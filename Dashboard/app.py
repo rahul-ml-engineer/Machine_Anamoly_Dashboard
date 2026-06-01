@@ -1,16 +1,15 @@
 import time
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 
-SENSOR_COLUMNS = [
-    "Temperature",
-    "Pressure",
-    "Current",
-    "Accelerometer1RMS",
-    "Volume Flow RateRMS",
-]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STREAMING_DIR = PROJECT_ROOT / "Data" / "streaming"
+PROCESSED_DIR = PROJECT_ROOT / "Data" / "Processed"
+
+SENSOR_COLUMNS = ["Temperature", "Pressure", "Current", "Accelerometer1RMS", "Volume Flow RateRMS"]
 
 DEFAULT_REASON = "Machine operating within normal range."
 DEFAULT_ACTION = "Continue monitoring."
@@ -47,12 +46,9 @@ st.set_page_config(
 
 @st.cache_data
 def load_stream_data():
-    stream_df = pd.read_csv("Data/streaming/live_stream_results.csv")
-    sensor_df = pd.read_csv(
-        "Data/Processed/anomaly_results.csv",
-        usecols=SENSOR_COLUMNS,
-    ).reset_index()
-    alerts_df = pd.read_csv("Data/streaming/final_alerts.csv")[
+    stream_df = pd.read_csv(STREAMING_DIR / "streaming_results.csv")
+    sensor_df = pd.read_csv(PROCESSED_DIR / "anomaly_results.csv", usecols=SENSOR_COLUMNS,).reset_index()
+    alerts_df = pd.read_csv(STREAMING_DIR / "streaming_results_explained.csv")[
         [
             "index",
             "possible_reason",
@@ -74,7 +70,7 @@ def load_stream_data():
 
 @st.cache_data
 def load_baseline(sensor_columns):
-    processed_df = pd.read_csv("Data/Processed/anomaly_results.csv")
+    processed_df = pd.read_csv(PROCESSED_DIR / "anomaly_results.csv")
 
     normal_df = processed_df
     if "anomaly_prediction" in processed_df.columns:
@@ -114,6 +110,28 @@ def get_parameter_drivers(row, baseline):
     return pd.DataFrame(drivers).sort_values("Impact Score", ascending=False)
 
 
+def get_problem_sensors(row, baseline, min_impact=1.0):
+    if row["status"] != "Anomaly":
+        return "None"
+
+    drivers_df = get_parameter_drivers(row, baseline)
+    problem_df = drivers_df[drivers_df["Impact Score"] >= min_impact]
+
+    if problem_df.empty:
+        problem_df = drivers_df.head(3)
+
+    return ", ".join(problem_df["Parameter"].tolist())
+
+
+def add_problem_sensor_column(dataframe, baseline):
+    result_df = dataframe.copy()
+    result_df["problem_sensors"] = result_df.apply(
+        lambda row: get_problem_sensors(row, baseline),
+        axis=1,
+    )
+    return result_df
+
+
 def format_driver_summary(drivers_df):
     top_driver = drivers_df.iloc[0]
 
@@ -132,6 +150,12 @@ st.title("Predictive Maintenance System")
 st.markdown("---")
 
 with st.sidebar:
+    page = st.radio(
+        "Dashboard page",
+        ["Live Stream", "Sensor Visualization"],
+    )
+
+    st.markdown("---")
     st.header("Stream Controls")
     view_mode = st.selectbox(
         "View mode",
@@ -174,7 +198,6 @@ with st.sidebar:
 
 status_placeholder = st.empty()
 driver_placeholder = st.empty()
-chart_placeholder = st.empty()
 table_placeholder = st.empty()
 control_placeholder = st.empty()
 
@@ -187,91 +210,171 @@ row = df.iloc[position]
 live_df = df.iloc[: position + 1]
 parameter_drivers_df = get_parameter_drivers(row, baseline_df)
 top_parameters_df = parameter_drivers_df.head(5)
+problem_sensors = get_problem_sensors(row, baseline_df)
+live_df = add_problem_sensor_column(live_df, baseline_df)
 
-with status_placeholder.container():
+if page == "Live Stream":
+    with status_placeholder.container():
+        st.subheader("Current Machine Status")
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        col1.metric("Status", row["status"])
+        col2.metric("Severity", row["severity"])
+        col3.metric("Anomaly Score", round(row["anomaly_score"], 4))
+        col4.metric("Prediction", row["prediction"])
+        col5.metric("Stream Row", int(row["index"]))
+
+        if row["status"] == "Anomaly":
+            st.warning(row["possible_reason"])
+            st.info(row["recommended_action"])
+        else:
+            st.success(row["possible_reason"])
+
+    with driver_placeholder.container():
+        st.subheader("Failure Driver Parameters")
+
+        if row["status"] == "Anomaly":
+            st.error(f"Problem sensors now: {problem_sensors}")
+
+            if row["severity"] == "CRITICAL":
+                st.error(format_driver_summary(parameter_drivers_df))
+            else:
+                st.warning(format_driver_summary(parameter_drivers_df))
+
+            impact_chart_df = top_parameters_df.set_index("Parameter")[["Impact Score"]]
+            st.bar_chart(impact_chart_df)
+
+            st.dataframe(
+                top_parameters_df[
+                    [
+                        "Parameter",
+                        "Current Value",
+                        "Normal Mean",
+                        "Direction",
+                        "Deviation",
+                        "Likely Failure Cause",
+                        "Recommended Check",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success("No failure driver detected for the current machine state.")
+            st.dataframe(
+                top_parameters_df[
+                    [
+                        "Parameter",
+                        "Current Value",
+                        "Normal Mean",
+                        "Direction",
+                        "Deviation",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+    with table_placeholder.container():
+        st.subheader("Live Alert Feed")
+
+        display_columns = [
+            "status",
+            "severity",
+            "anomaly_score",
+            "problem_sensors",
+            *SENSOR_COLUMNS,
+            "possible_reason",
+            "recommended_action",
+        ]
+
+        st.dataframe(
+            live_df[display_columns].tail(10),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+else:
     st.subheader("Current Machine Status")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     col1.metric("Status", row["status"])
     col2.metric("Severity", row["severity"])
     col3.metric("Anomaly Score", round(row["anomaly_score"], 4))
     col4.metric("Prediction", row["prediction"])
+    col5.metric("Stream Row", int(row["index"]))
 
     if row["status"] == "Anomaly":
-        st.warning(row["possible_reason"])
-        st.info(row["recommended_action"])
+        st.warning(f"Problem sensors now: {problem_sensors}")
     else:
-        st.success(row["possible_reason"])
+        st.success("No problem sensors detected in the current row.")
 
-with driver_placeholder.container():
-    st.subheader("Failure Driver Parameters")
+    st.markdown("---")
+    st.subheader("Live Sensor Values")
 
-    if row["status"] == "Anomaly":
-        if row["severity"] == "CRITICAL":
-            st.error(format_driver_summary(parameter_drivers_df))
-        else:
-            st.warning(format_driver_summary(parameter_drivers_df))
-
-        impact_chart_df = top_parameters_df.set_index("Parameter")[["Impact Score"]]
-        st.bar_chart(impact_chart_df)
-
-        st.dataframe(
-            top_parameters_df[
-                [
-                    "Parameter",
-                    "Current Value",
-                    "Normal Mean",
-                    "Direction",
-                    "Deviation",
-                    "Likely Failure Cause",
-                    "Recommended Check",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.success("No failure driver detected for the current machine state.")
-        st.dataframe(
-            top_parameters_df[
-                [
-                    "Parameter",
-                    "Current Value",
-                    "Normal Mean",
-                    "Direction",
-                    "Deviation",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
+    sensor_cols = st.columns(len(SENSOR_COLUMNS))
+    for sensor_col, sensor_name in zip(sensor_cols, SENSOR_COLUMNS):
+        current_value = row[sensor_name]
+        normal_mean = baseline_df.loc[sensor_name, "mean"]
+        delta_value = current_value - normal_mean
+        sensor_col.metric(
+            sensor_name,
+            round(current_value, 4),
+            delta=round(delta_value, 4),
         )
 
-with chart_placeholder.container():
-    st.subheader("Live Anomaly and Sensor Trends")
+    st.markdown("---")
+    st.subheader("Sensor Live Visualization")
 
-    score_tab, sensor_tab = st.tabs(["Anomaly Score", "Failure Parameters"])
+    selected_sensors = st.multiselect(
+        "Sensors",
+        SENSOR_COLUMNS,
+        default=SENSOR_COLUMNS,
+    )
 
-    with score_tab:
-        st.line_chart(live_df[["anomaly_score"]])
+    if selected_sensors:
+        st.line_chart(live_df[selected_sensors], use_container_width=True)
+    else:
+        st.info("Select at least one sensor to show the live trend.")
 
-    with sensor_tab:
-        st.line_chart(live_df[SENSOR_COLUMNS])
+    st.markdown("---")
+    st.subheader("Problem Sensor Ranking")
 
-with table_placeholder.container():
-    st.subheader("Live Alert Feed")
+    st.bar_chart(top_parameters_df.set_index("Parameter")[["Impact Score"]])
 
-    display_columns = [
+    st.dataframe(
+        top_parameters_df[
+            [
+                "Parameter",
+                "Current Value",
+                "Normal Mean",
+                "Direction",
+                "Deviation",
+                "Impact Score",
+                "Likely Failure Cause",
+                "Recommended Check",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
+    st.subheader("Sensor Alert History")
+
+    sensor_history_columns = [
         "status",
         "severity",
         "anomaly_score",
+        "problem_sensors",
         *SENSOR_COLUMNS,
-        "possible_reason",
-        "recommended_action",
     ]
 
     st.dataframe(
-        live_df[display_columns].tail(10),
+        live_df[sensor_history_columns].tail(20),
         use_container_width=True,
         hide_index=True,
     )
