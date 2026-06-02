@@ -1,4 +1,4 @@
-# Machine RUL Dashboard
+# Machine Anamoly Dashboard
 
 A Streamlit dashboard for predictive maintenance and remaining useful life (RUL) style monitoring. The app streams machine sensor readings, highlights anomaly status, ranks likely failure-driver parameters, and recommends maintenance checks for abnormal machine behavior.
 
